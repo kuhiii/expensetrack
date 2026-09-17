@@ -1,79 +1,69 @@
-This is a new [**React Native**](https://reactnative.dev) project, bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).
+# my expense
 
-# Getting Started
+A personal expense tracker for Android that reads bank SMS and works out where
+the money went, so there's nothing to enter by hand. Pink, with a pixel cat.
 
->**Note**: Make sure you have completed the [React Native - Environment Setup](https://reactnative.dev/docs/environment-setup) instructions till "Creating a new application" step, before proceeding.
+Built for one phone and one set of accounts (HDFC + PNB, Indian bank SMS
+formats), sideloaded rather than shipped. React Native, local SQLite, no
+backend and no account — the data never leaves the device.
 
-## Step 1: Start the Metro Server
+## What it does
 
-First, you will need to start **Metro**, the JavaScript _bundler_ that ships _with_ React Native.
+- **Reads the SMS inbox** and parses bank messages into transactions: amount,
+  direction, payee, bank, account. Non-bank senders are ignored, so telco bills
+  and promos don't get counted as spending.
+- **Categorises automatically.** Tag a payee once and every past and future
+  message from them lands in the same category.
+- **A swipe queue for the rest** — swipe left to skip, right to tag, with a note
+  if you want one.
+- **Tracks income too.** Salary lands in `paycheck`; a refund sits in the
+  category it came out of.
+- **Self-transfers aren't spending.** Money moved to your own savings account is
+  tracked as savings and nets out when it comes back, rather than being counted
+  twice.
+- **A running balance** — each month's leftover carries into the next.
 
-To start Metro, run the following command from the _root_ of your React Native project:
+## Layout
 
-```bash
-# using npm
-npm start
-
-# OR using Yarn
-yarn start
+```
+src/data/         the whole pipeline: SMS parsing (categorize.ts),
+                  ingest (ingest.ts, smsBridge.ts), SQLite (db.ts)
+src/components/   the home card, swipe stack, category list, sheets
+src/screens/      HomeScreen, CategoryDetailScreen
+src/theme/        design tokens — Base-derived scale, Anton + Urbanist
+android/…/sms/    Kotlin: BroadcastReceiver for live SMS + inbox reader
+android/…/appicon/ Kotlin: switches the launcher icon between two cats
 ```
 
-## Step 2: Start your Application
+The SMS parsing in `src/data/categorize.ts` was written against a real inbox of
+~11,000 messages rather than generic templates, which is most of why it
+matches anything at all. Regional bank SMS is not a standard.
 
-Let Metro Bundler run in its _own_ terminal. Open a _new_ terminal from the _root_ of your React Native project. Run the following command to start your _Android_ or _iOS_ app:
+## Running it
 
-### For Android
-
-```bash
-# using npm
-npm run android
-
-# OR using Yarn
-yarn android
-```
-
-### For iOS
+Needs Android SDK, JDK 17, and a device connected over USB with USB debugging on.
 
 ```bash
-# using npm
-npm run ios
-
-# OR using Yarn
-yarn ios
+npm install
+npx react-native start          # Metro
+npx react-native run-android    # build + install the debug app
 ```
 
-If everything is set up _correctly_, you should see your new app running in your _Android Emulator_ or _iOS Simulator_ shortly provided you have set up your emulator/simulator correctly.
+A standalone build that doesn't need Metro:
 
-This is one way to run your app — you can also run it directly from within Android Studio and Xcode respectively.
+```bash
+cd android && ./gradlew assembleRelease
+adb install -r app/build/outputs/apk/release/app-release.apk
+```
 
-## Step 3: Modifying your App
+`MainActivity` has no launcher entry of its own — the two icon aliases carry it
+— so if `run-android` can't start the app, launch it explicitly:
 
-Now that you have successfully run the app, let's modify it.
+```bash
+adb shell am start -n com.expensetracker/.MainActivityManeki
+```
 
-1. Open `App.tsx` in your text editor of choice and edit some lines.
-2. For **Android**: Press the <kbd>R</kbd> key twice or select **"Reload"** from the **Developer Menu** (<kbd>Ctrl</kbd> + <kbd>M</kbd> (on Window and Linux) or <kbd>Cmd ⌘</kbd> + <kbd>M</kbd> (on macOS)) to see your changes!
+## Permissions
 
-   For **iOS**: Hit <kbd>Cmd ⌘</kbd> + <kbd>R</kbd> in your iOS Simulator to reload the app and see your changes!
-
-## Congratulations! :tada:
-
-You've successfully run and modified your React Native App. :partying_face:
-
-### Now what?
-
-- If you want to add this new React Native code to an existing application, check out the [Integration guide](https://reactnative.dev/docs/integration-with-existing-apps).
-- If you're curious to learn more about React Native, check out the [Introduction to React Native](https://reactnative.dev/docs/getting-started).
-
-# Troubleshooting
-
-If you can't get this to work, see the [Troubleshooting](https://reactnative.dev/docs/troubleshooting) page.
-
-# Learn More
-
-To learn more about React Native, take a look at the following resources:
-
-- [React Native Website](https://reactnative.dev) - learn more about React Native.
-- [Getting Started](https://reactnative.dev/docs/environment-setup) - an **overview** of React Native and how setup your environment.
-- [Learn the Basics](https://reactnative.dev/docs/getting-started) - a **guided tour** of the React Native **basics**.
-- [Blog](https://reactnative.dev/blog) - read the latest official React Native **Blog** posts.
-- [`@facebook/react-native`](https://github.com/facebook/react-native) - the Open Source; GitHub **repository** for React Native.
+`READ_SMS` and `RECEIVE_SMS`, and that's the point of the app. Nothing is
+uploaded anywhere; there's no network code beyond React Native's own dev tooling.
