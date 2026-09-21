@@ -1,11 +1,13 @@
 import { backfillInbox } from './smsBridge';
 import {
   applyPayeeRules,
+  backfillBalances,
   categorizePaychecks,
   categorizeSavingsTransfers,
   clearSelfTransferRule,
   dedupeTransactions,
   excludePnbCredits,
+  purgeNonTransactions,
   getPayeeRules,
   reconcileDirections,
   repairUnknownPayees,
@@ -37,6 +39,12 @@ export function runIngest(payeeHistory: Record<string, string>): Promise<Record<
         await repairUnknownPayees();
         // Deposits were previously stored as spending; fix them in place.
         await reconcileDirections();
+        // The bank's own quoted balance, read out of messages stored
+        // before that column existed — getBalance anchors on it.
+        await backfillBalances();
+        // Bank marketing, payment requests and mandate reminders that an
+        // older parser stored as real transactions.
+        await purgeNonTransactions();
         // Rows tagged by a category that no longer exists (a stale
         // 'self-transfer' categoryId from a much older version of the app)
         // are put back into play so the step below gets a chance at them —

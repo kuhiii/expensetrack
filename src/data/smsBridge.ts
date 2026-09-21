@@ -33,8 +33,20 @@ async function processIncomingSms(sender: string, body: string, timestamp: numbe
 
 /** Epoch ms of the newest message already ingested. */
 const LAST_SMS_TS = 'lastSmsTs';
+/**
+ * How far back before the watermark each run re-reads.
+ *
+ * The watermark alone lost messages. It records the newest date seen, and
+ * everything at or below it was skipped forever — so an SMS that reaches the
+ * inbox *late*, carrying an older date than one already ingested (a carrier
+ * retry, a delayed delivery), was never picked up. Two real debits went
+ * missing this way in Aug and Sep. Re-reading a window is enough to catch
+ * them because inserts are keyed on a hash of the message body, so seeing
+ * one again is a no-op.
+ */
+const LOOKBACK_MS = 45 * 24 * 60 * 60 * 1000;
 /** Bumped whenever the parser or the bank filter changes. */
-const INGEST_VERSION = '2';
+const INGEST_VERSION = '3';
 const INGEST_VERSION_KEY = 'ingestVersion';
 
 /**
@@ -44,8 +56,8 @@ const INGEST_VERSION_KEY = 'ingestVersion';
  * Reads the *whole* inbox (0 = no limit) rather than the newest 2,000: that
  * cap silently cut history off at Jan 2026 and dropped 2,514 bank messages.
  * A watermark keeps that affordable — the first run ingests everything, and
- * later runs only look at messages newer than the last one seen, instead of
- * re-parsing ~11k messages on every launch.
+ * later runs only look at recent messages instead of re-parsing ~11k on every
+ * launch. It deliberately reaches back past the watermark; see LOOKBACK_MS.
  */
 export async function backfillInbox(payeeHistory: Record<string, string>): Promise<number> {
   const { SmsReceiverModule } = NativeModules;
@@ -60,10 +72,11 @@ export async function backfillInbox(payeeHistory: Record<string, string>): Promi
   const ingestedWith = await getMeta(INGEST_VERSION_KEY);
   if (ingestedWith !== INGEST_VERSION) await setMeta(LAST_SMS_TS, '0');
 
-  const since = Number(await getMeta(LAST_SMS_TS)) || 0;
+  const watermark = Number(await getMeta(LAST_SMS_TS)) || 0;
+  const since = watermark > 0 ? Math.max(watermark - LOOKBACK_MS, 0) : 0;
   const list: { address: string; body: string; date: number }[] = await SmsReceiverModule.readInbox(0);
 
-  let newest = since;
+  let newest = watermark;
   let processed = 0;
   for (const sms of list) {
     const ts = Number(sms.date);
@@ -72,7 +85,7 @@ export async function backfillInbox(payeeHistory: Record<string, string>): Promi
     if (ts > newest) newest = ts;
     processed++;
   }
-  if (newest > since) await setMeta(LAST_SMS_TS, String(newest));
+  if (newest > watermark) await setMeta(LAST_SMS_TS, String(newest));
   await setMeta(INGEST_VERSION_KEY, INGEST_VERSION);
   return processed;
 }

@@ -8,8 +8,10 @@ import {
 import { MANUAL_BANK, MANUAL_ENTRIES, MANUAL_MONTH, manualEntryId } from './manualEntries';
 import {
   detectDirection,
+  extractBalance,
   extractPayee,
   isBankSender,
+  isNonTransactionMessage,
   SEED_PAYEE_RULES,
   SELF_TRANSFER,
   UNKNOWN_PAYEE,
@@ -28,6 +30,8 @@ export type Transaction = {
   categoryId: string; // UNCATEGORIZED_ID until tagged
   rawSms: string;
   note: string | null;
+  /** The balance the bank quoted in this message, when it quoted one. */
+  balanceAfter?: number | null;
 };
 
 export type Category = {
@@ -86,6 +90,7 @@ async function initDb(): Promise<SQLite.SQLiteDatabase> {
     );
   `);
   await addColumnIfMissing(dbInstance, 'transactions', 'note', 'note TEXT');
+  await addColumnIfMissing(dbInstance, 'transactions', 'balanceAfter', 'balanceAfter REAL');
   await dbInstance.executeSql(`
     CREATE TABLE IF NOT EXISTS meta (
       key TEXT PRIMARY KEY,
@@ -188,8 +193,17 @@ async function ensureCategory(db: SQLite.SQLiteDatabase, categoryId: string) {
   );
 }
 
-/** Remembers "this payee always means this category", across launches. */
+/**
+ * Remembers "this payee always means this category", across launches.
+ *
+ * UNKNOWN_PAYEE is never stored as a rule. It isn't a payee — it's the
+ * placeholder for every message the parser couldn't read a name out of, so
+ * a rule keyed on it isn't "this merchant means subscriptions", it's
+ * "anything unreadable means subscriptions", and it swept unrelated
+ * messages into whichever category an unknown one was last tagged with.
+ */
 export async function setPayeeRule(payee: string, categoryId: string) {
+  if (payee.trim().toLowerCase() === UNKNOWN_PAYEE.toLowerCase()) return;
   const db = await getDb();
   await db.executeSql('INSERT OR REPLACE INTO payee_rules (payee, categoryId) VALUES (?, ?)', [
     payee.trim().toLowerCase(),
@@ -408,8 +422,8 @@ export async function insertTransaction(
   const id = tx.id ?? transactionId(tx.rawSms);
   await db.executeSql(
     `INSERT OR IGNORE INTO transactions
-     (id, amount, direction, payee, bank, accountLast4, timestamp, categoryId, rawSms, note)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     (id, amount, direction, payee, bank, accountLast4, timestamp, categoryId, rawSms, note, balanceAfter)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       tx.amount,
@@ -421,6 +435,7 @@ export async function insertTransaction(
       tx.categoryId,
       tx.rawSms,
       tx.note ?? null,
+      tx.balanceAfter ?? extractBalance(tx.rawSms ?? ''),
     ]
   );
   return id;
@@ -573,6 +588,54 @@ export async function resetOrphanedCategories(): Promise<number> {
     );
   }
   return count;
+}
+
+/**
+ * Drops the catch-all rule on UNKNOWN_PAYEE if an older build wrote one,
+ * and deletes stored rows that were never transactions to begin with —
+ * bank marketing, collect requests and mandate reminders (see
+ * isNonTransactionMessage). Both are one-time in practice: the parser no
+ * longer creates either, so after the first pass these find nothing.
+ */
+export async function purgeNonTransactions(): Promise<number> {
+  const db = await getDb();
+  await db.executeSql('DELETE FROM payee_rules WHERE LOWER(payee) = ?', [
+    UNKNOWN_PAYEE.toLowerCase(),
+  ]);
+
+  const [result] = await db.executeSql(
+    "SELECT id, rawSms FROM transactions WHERE rawSms <> ''"
+  );
+  const doomed: string[] = [];
+  for (let i = 0; i < result.rows.length; i++) {
+    const row = result.rows.item(i);
+    if (isNonTransactionMessage(String(row.rawSms ?? ''))) doomed.push(row.id);
+  }
+  for (const id of doomed) {
+    await db.executeSql('DELETE FROM transactions WHERE id = ?', [id]);
+  }
+  return doomed.length;
+}
+
+/**
+ * Fills in balanceAfter for rows stored before the column existed. The
+ * figure is re-read from the message text that's already on disk, so this
+ * needs no network and no re-scan of the inbox.
+ */
+export async function backfillBalances(): Promise<number> {
+  const db = await getDb();
+  const [result] = await db.executeSql(
+    "SELECT id, rawSms FROM transactions WHERE balanceAfter IS NULL AND rawSms <> ''"
+  );
+  let filled = 0;
+  for (let i = 0; i < result.rows.length; i++) {
+    const row = result.rows.item(i);
+    const balance = extractBalance(String(row.rawSms ?? ''));
+    if (balance === null) continue;
+    await db.executeSql('UPDATE transactions SET balanceAfter = ? WHERE id = ?', [balance, row.id]);
+    filled++;
+  }
+  return filled;
 }
 
 /**
@@ -839,15 +902,40 @@ export async function getCategoryTotals(range?: MonthRange): Promise<Record<stri
 }
 
 /**
- * Balance at the end of a month, carrying every earlier month's leftover
- * forward. The running total starts at BALANCE_SINCE — history before it is
- * incomplete, so summing all of it would carry forward a number that was
- * never real. A month before that start just shows its own leftover.
+ * Balance at the end of a month, taken from what the bank itself last said
+ * and adjusted by everything since.
+ *
+ * It used to add up every transaction from a fixed start date, which only
+ * works if not one message is missing between then and now — and they do go
+ * missing (a delayed SMS, an account that stopped texting, a month entered by
+ * hand). One gap silently skewed every later month. The bank quotes a running
+ * balance in many of its messages, so the newest of those is used as the
+ * anchor and only the transactions after it are applied. Anchored to the
+ * spending account: the savings account reports its own separate balance, and
+ * mixing the two would double-count money moved between them.
  */
-export const BALANCE_SINCE = UNTAGGED_SINCE;
+const BALANCE_ACCOUNT = 'HDFC';
 
 export async function getBalance(range: MonthRange): Promise<number> {
-  const window = { start: Math.min(range.start, BALANCE_SINCE), end: range.end };
-  const [received, spent] = await Promise.all([getTotalReceived(window), getTotalSpend(window)]);
-  return received - spent;
+  const db = await getDb();
+  const [anchorRow] = await db.executeSql(
+    `SELECT balanceAfter, timestamp FROM transactions
+     WHERE balanceAfter IS NOT NULL AND bank LIKE ? AND timestamp < ?
+     ORDER BY timestamp DESC LIMIT 1`,
+    [`${BALANCE_ACCOUNT}%`, range.end]
+  );
+  if (anchorRow.rows.length === 0) return 0;
+  const anchor = anchorRow.rows.item(0);
+
+  // Strictly after the anchor: the quoted balance already includes the
+  // transaction that message was about.
+  const [delta] = await db.executeSql(
+    `SELECT COALESCE(SUM(CASE WHEN direction = 'credit' THEN amount
+                              WHEN direction = 'debit' THEN -amount
+                              ELSE 0 END), 0) as net
+     FROM transactions
+     WHERE bank LIKE ? AND timestamp > ? AND timestamp < ?`,
+    [`${BALANCE_ACCOUNT}%`, anchor.timestamp, range.end]
+  );
+  return (anchor.balanceAfter as number) + (delta.rows.item(0).net as number);
 }

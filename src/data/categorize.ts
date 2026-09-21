@@ -2,6 +2,8 @@ import { UNCATEGORIZED_ID } from './categories';
 
 export type ParsedSms = {
   amount: number;
+  /** The account balance the bank quoted in this message, when it quoted one. */
+  balanceAfter: number | null;
   direction: 'debit' | 'credit';
   payee: string;
   bank: string;
@@ -25,6 +27,22 @@ const DEBIT_RE = /\b(debited|debit|spent|sent|paid|withdrawn)\b/i;
 const CREDIT_RE =
   /\b(credited|credit|received|deposited|deposit|refund(?:ed)?|reversed|cashback)\b/i;
 const ACCOUNT_RE = /a\/?c\s?(?:no\.?|ending)?\s?[x*]*(\d{3,4})/i;
+/**
+ * The running balance the bank quotes in a lot of its messages — "Avl bal INR
+ * 1,20,240.48", "AvlBal INR 11500.60", "Avl bal: 18859.58". It's the only
+ * authoritative figure in the whole pipeline: everything else the app knows is
+ * inferred by adding up messages, which silently goes wrong the moment one is
+ * missing.
+ */
+const BALANCE_RE =
+  /(?:avl(?:\.|ailable)?\s*bal(?:ance)?|avlbal|bal)\s*(?:is|:)?\s*(?:inr|rs\.?)?\s*([\d,]+\.?\d*)/i;
+
+export function extractBalance(body: string): number | null {
+  const m = body.match(BALANCE_RE);
+  if (!m) return null;
+  const value = parseFloat(m[1].replace(/,/g, ''));
+  return Number.isFinite(value) ? value : null;
+}
 // Payee extraction, written against the real inbox rather than generic
 // templates. The dominant HDFC shape is
 //   "Sent Rs.431.00 From HDFC Bank A/C *1234 To JOHN DOE On 02/08/25 Ref ..."
@@ -56,6 +74,29 @@ const BANK_CODES =
 
 export function isBankSender(sender: string): boolean {
   return BANK_CODES.test(sender);
+}
+
+/**
+ * Messages a bank sends that aren't money moving. A bank shortcode is not
+ * enough on its own: the same number that texts you a debit also sends
+ * marketing, payment requests and reminders, all of which carry a rupee
+ * amount and a debit/credit word, and were being stored as real
+ * transactions. Measured against the inbox this rejects 27 messages out of
+ * 2,896 and leaves every genuine one:
+ *
+ *   "…has requested Rs. 2086.00 from you"      a collect request, not a payment
+ *   "Upcoming mandate set for 11/8/24 …
+ *    your account will be debited with Rs 59"  a heads-up; the real debit texts later
+ *   "10% cashback up to Rs.50 … T&C"           an advert
+ *
+ * A reversal ("your UPI transaction of Rs.20 has been reversed") is real
+ * money coming back and deliberately isn't matched here.
+ */
+const NOT_A_TRANSACTION_RE =
+  /\bhas requested\b|\bupcoming mandate\b|\bwill be debited with\b|\b(?:up\s?to|upto)\s+(?:rs|inr)\b|\bT&C\b|\bapply now\b|\blimit per txn\b|\bkindly maintain\b/i;
+
+export function isNonTransactionMessage(body: string): boolean {
+  return NOT_A_TRANSACTION_RE.test(body);
 }
 
 /**
@@ -135,6 +176,8 @@ export function parseTransactionSms(sender: string, body: string, timestamp: num
   // A rupee amount alone is not a transaction — telco bills and marketing
   // messages are full of them. Require a bank sender first.
   if (!isBankSender(sender)) return null;
+  // ...and a bank sender alone isn't enough — see isNonTransactionMessage.
+  if (isNonTransactionMessage(body)) return null;
 
   const amountMatch = body.match(AMOUNT_RE);
   if (!amountMatch) return null; // not a transaction SMS (OTP/promo/etc.)
@@ -155,6 +198,7 @@ export function parseTransactionSms(sender: string, body: string, timestamp: num
 
   return {
     amount,
+    balanceAfter: extractBalance(body),
     direction,
     payee: extractPayee(body),
     bank: bankMatch ? bankMatch[1] : sender,

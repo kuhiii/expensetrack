@@ -31,7 +31,9 @@ export const base = {
 
   negative: '#D44333',
   warning: '#FFC043',
-  positive: '#21A453',
+  // Lighter than Base's green: money in is context next to the spend
+  // figure, not a warning, and the darker tone read as heavy beside it.
+  positive: '#2DB863',
 };
 
 // The footer band. Not part of Base's palette — a small, self-contained set

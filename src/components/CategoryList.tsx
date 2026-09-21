@@ -28,14 +28,20 @@ export function CategoryList({ categories, totals, onOpenCategory, onCategoryCre
     // Untagged money belongs to no real category, so without this synthetic
     // row the breakdown could never add up to the figures on the card. It
     // sorts in with the rest rather than always trailing them.
-    const shown: Category[] = categories.filter((c) => !c.hidden);
+    // Categories with nothing this month are folded away with the hidden
+    // ones rather than dropped: a list of mostly ₹0 rows buries the handful
+    // that matter, but they still have to be reachable to be tagged into or
+    // edited.
+    const shown: Category[] = categories.filter((c) => !c.hidden && volume(totals[c.id]) > 0);
     if (volume(untagged) > 0) {
       shown.push({ id: UNCATEGORIZED_ID, label: 'untagged', colorHex: base.contentTertiary, createdAt: 0 });
     }
     // Highest first; sort is stable, so ties keep their order between renders.
     const byVolume = (a: Category, b: Category) => volume(totals[b.id]) - volume(totals[a.id]);
     const sortedShown = shown.sort(byVolume);
-    const sortedHidden = categories.filter((c) => c.hidden).sort(byVolume);
+    const sortedHidden = categories
+      .filter((c) => c.hidden || volume(totals[c.id]) === 0)
+      .sort(byVolume);
     const max = Math.max(...sortedShown.map((c) => volume(totals[c.id])), 0);
     return { visible: sortedShown, hidden: sortedHidden, scale: max };
   }, [categories, totals]);
@@ -64,7 +70,7 @@ export function CategoryList({ categories, totals, onOpenCategory, onCategoryCre
       {hidden.length > 0 && (
         <Pressable onPress={() => setShowHidden((v) => !v)} hitSlop={8} style={styles.hiddenToggle}>
           <Text style={styles.headerLink}>
-            {showHidden ? 'hide hidden' : `show hidden (${hidden.length})`}
+            {showHidden ? 'show less' : `show all (${hidden.length})`}
           </Text>
         </Pressable>
       )}
