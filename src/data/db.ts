@@ -723,25 +723,79 @@ export async function categorizeSavingsTransfers(): Promise<number> {
       [SAVINGS_CATEGORY_ID, UNCATEGORIZED_ID]
     );
   }
-  return count;
+  return count + (await claimReturningLegs(db));
+}
+
+/** The UPI reference a bank quotes: PNB "UPI:627387266265", HDFC "(UPI 627387266265)". */
+function upiRef(body: string): string | null {
+  const m = body.match(/\bUPI[:\s]*(\d{10,})/i);
+  return m ? m[1] : null;
+}
+
+/**
+ * The HDFC half of a savings withdrawal.
+ *
+ * Moving money PNB→HDFC texts twice: PNB says "debited … to KUNJAL SINGH",
+ * HDFC says "credited … from VPA 8630101578@pthdfc", and both quote the same
+ * UPI reference. The PNB leg is the withdrawal; the HDFC leg is the same
+ * money arriving, and counting it as income would inflate "received" by the
+ * whole amount. Matched on the shared reference rather than the VPA, so it
+ * needs no hardcoded handle and can't catch an unrelated credit.
+ *
+ * The row keeps direction 'credit' — it's filed under savings so
+ * getTotalReceived skips it, but getBalance still has to see money land in
+ * HDFC, or the balance stops matching the bank's own figure.
+ */
+async function claimReturningLegs(db: SQLite.SQLiteDatabase): Promise<number> {
+  const [withdrawals] = await db.executeSql(
+    `SELECT rawSms FROM transactions
+     WHERE categoryId = ? AND direction = 'debit' AND bank LIKE 'PNB%'`,
+    [SAVINGS_CATEGORY_ID]
+  );
+  const refs = new Set<string>();
+  for (let i = 0; i < withdrawals.rows.length; i++) {
+    const ref = upiRef(String(withdrawals.rows.item(i).rawSms ?? ''));
+    if (ref) refs.add(ref);
+  }
+  if (refs.size === 0) return 0;
+
+  const [credits] = await db.executeSql(
+    `SELECT id, rawSms FROM transactions
+     WHERE direction = 'credit' AND bank LIKE 'HDFC%' AND categoryId = ?`,
+    [UNCATEGORIZED_ID]
+  );
+  let claimed = 0;
+  for (let i = 0; i < credits.rows.length; i++) {
+    const row = credits.rows.item(i);
+    const ref = upiRef(String(row.rawSms ?? ''));
+    if (!ref || !refs.has(ref)) continue;
+    await db.executeSql('UPDATE transactions SET categoryId = ? WHERE id = ?', [
+      SAVINGS_CATEGORY_ID,
+      row.id,
+    ]);
+    claimed++;
+  }
+  return claimed;
 }
 
 /**
  * Net balance of the savings category — deposits (the HDFC leg) minus
  * withdrawals (the PNB leg) — rather than the plain sum every other
  * category gets. Summing both legs the normal way would add a withdrawal
- * to a deposit instead of netting it against one.
+ * to a deposit instead of netting it against one. Debits only: the HDFC
+ * credit filed here by claimReturningLegs is the same money as the PNB
+ * withdrawal, already counted once.
  */
 async function getSavingsNet(db: SQLite.SQLiteDatabase, range?: MonthRange): Promise<number> {
   const [result] = range
     ? await db.executeSql(
         `SELECT COALESCE(SUM(CASE WHEN bank LIKE 'HDFC%' THEN amount WHEN bank LIKE 'PNB%' THEN -amount ELSE 0 END), 0) as net
-         FROM transactions WHERE categoryId = ? AND timestamp >= ? AND timestamp < ?`,
+         FROM transactions WHERE categoryId = ? AND direction = 'debit' AND timestamp >= ? AND timestamp < ?`,
         [SAVINGS_CATEGORY_ID, range.start, range.end]
       )
     : await db.executeSql(
         `SELECT COALESCE(SUM(CASE WHEN bank LIKE 'HDFC%' THEN amount WHEN bank LIKE 'PNB%' THEN -amount ELSE 0 END), 0) as net
-         FROM transactions WHERE categoryId = ?`,
+         FROM transactions WHERE categoryId = ? AND direction = 'debit'`,
         [SAVINGS_CATEGORY_ID]
       );
   return result.rows.item(0).net as number;
@@ -818,8 +872,17 @@ export async function getUncategorized(range?: MonthRange): Promise<Transaction[
 
 export async function getTransactionsForCategory(categoryId: string): Promise<Transaction[]> {
   const db = await getDb();
+  // Every transfer between your own accounts texts twice — once from the
+  // account it leaves, once from the one it lands in — and both legs can end
+  // up filed here. Only the leaving leg is a movement of savings, and it's
+  // always a debit, so the list keeps debits and nothing else. Anything
+  // narrower (hiding just credits) let PNB's incoming leg through as a
+  // duplicate once its payee became readable.
+  const movementsOnly = categoryId === SAVINGS_CATEGORY_ID;
   const [result] = await db.executeSql(
-    'SELECT * FROM transactions WHERE categoryId = ? ORDER BY timestamp DESC',
+    `SELECT * FROM transactions WHERE categoryId = ?
+     ${movementsOnly ? "AND direction = 'debit'" : ''}
+     ORDER BY timestamp DESC`,
     [categoryId]
   );
   const rows: Transaction[] = [];
@@ -865,14 +928,18 @@ export async function getTotalSpend(range?: MonthRange): Promise<number> {
 /** Money in for the window — credits, which never count toward spending. */
 export async function getTotalReceived(range?: MonthRange): Promise<number> {
   const db = await getDb();
+  // Money coming back out of your own savings isn't income — see
+  // claimReturningLegs.
   const [result] = range
     ? await db.executeSql(
         `SELECT COALESCE(SUM(amount), 0) as total FROM transactions
-         WHERE direction = 'credit' AND timestamp >= ? AND timestamp < ?`,
-        [range.start, range.end]
+         WHERE direction = 'credit' AND categoryId != ? AND timestamp >= ? AND timestamp < ?`,
+        [SAVINGS_CATEGORY_ID, range.start, range.end]
       )
     : await db.executeSql(
-        `SELECT COALESCE(SUM(amount), 0) as total FROM transactions WHERE direction = 'credit'`
+        `SELECT COALESCE(SUM(amount), 0) as total FROM transactions
+         WHERE direction = 'credit' AND categoryId != ?`,
+        [SAVINGS_CATEGORY_ID]
       );
   return result.rows.item(0).total as number;
 }
@@ -936,6 +1003,70 @@ export async function getBalance(range: MonthRange): Promise<number> {
      FROM transactions
      WHERE bank LIKE ? AND timestamp > ? AND timestamp < ?`,
     [`${BALANCE_ACCOUNT}%`, anchor.timestamp, range.end]
+  );
+  return (anchor.balanceAfter as number) + (delta.rows.item(0).net as number);
+}
+
+/** When saving into the PNB fund began — the tulsi's first leaf. */
+export const SAVINGS_SINCE = new Date(2026, 7, 1).getTime();
+
+/** One month of savings activity: money moved into PNB and money taken back out. */
+export type SavingsMonth = { year: number; month: number; deposited: number; withdrawn: number };
+
+/**
+ * Savings, month by month, up to the end of `range` — the tulsi grows one leaf
+ * per month. Read-only, and built from the same rows getSavingsNet nets: HDFC
+ * debits to your own name are deposits, PNB debits to your own name are
+ * withdrawals. Debits only, for the same reason getSavingsNet gives.
+ */
+export async function getSavingsMonths(range: MonthRange): Promise<SavingsMonth[]> {
+  const db = await getDb();
+  // Only money moved between your own accounts — the PNB fund. Mutual-fund SIPs
+  // are tagged into this category too, but they never reach PNB, so they don't
+  // grow the tulsi. Counted from when saving into PNB began.
+  const [result] = await db.executeSql(
+    `SELECT amount, bank, timestamp FROM transactions
+     WHERE categoryId = ? AND direction = 'debit' AND LOWER(payee) = 'kunjal singh'
+       AND timestamp >= ? AND timestamp < ?
+     ORDER BY timestamp ASC`,
+    [SAVINGS_CATEGORY_ID, SAVINGS_SINCE, range.end]
+  );
+  const byMonth = new Map<string, SavingsMonth>();
+  for (let i = 0; i < result.rows.length; i++) {
+    const row = result.rows.item(i);
+    const d = new Date(row.timestamp);
+    const key = `${d.getFullYear()}-${d.getMonth()}`;
+    const entry = byMonth.get(key) ?? { year: d.getFullYear(), month: d.getMonth(), deposited: 0, withdrawn: 0 };
+    const bank = String(row.bank ?? '').toUpperCase();
+    if (bank.startsWith('HDFC')) entry.deposited += row.amount;
+    else if (bank.startsWith('PNB')) entry.withdrawn += row.amount;
+    byMonth.set(key, entry);
+  }
+  return [...byMonth.values()].sort((a, b) => a.year - b.year || a.month - b.month);
+}
+
+/**
+ * The savings fund: the PNB account's balance at the end of `range`, anchored
+ * on the newest balance PNB itself quoted — the same approach getBalance takes
+ * for HDFC. Null when PNB has never quoted a balance.
+ */
+export async function getSavingsFund(range: MonthRange): Promise<number | null> {
+  const db = await getDb();
+  const [anchorRow] = await db.executeSql(
+    `SELECT balanceAfter, timestamp FROM transactions
+     WHERE balanceAfter IS NOT NULL AND bank LIKE 'PNB%' AND timestamp < ?
+     ORDER BY timestamp DESC LIMIT 1`,
+    [range.end]
+  );
+  if (anchorRow.rows.length === 0) return null;
+  const anchor = anchorRow.rows.item(0);
+  const [delta] = await db.executeSql(
+    `SELECT COALESCE(SUM(CASE WHEN direction IN ('credit', 'transfer') THEN amount
+                              WHEN direction = 'debit' THEN -amount
+                              ELSE 0 END), 0) as net
+     FROM transactions
+     WHERE bank LIKE 'PNB%' AND timestamp > ? AND timestamp < ?`,
+    [anchor.timestamp, range.end]
   );
   return (anchor.balanceAfter as number) + (delta.rows.item(0).net as number);
 }

@@ -25,6 +25,13 @@ import { UNCATEGORIZED_ID } from '../data/categories';
 import { formatMonthLabel } from '../utils/dateFormat';
 import { BottomSheet } from '../components/BottomSheet';
 import { IconPicker } from '../components/IconPicker';
+import { Image } from 'react-native';
+import { GULLAK_LAYOUT } from '../world/gullakLayout';
+import { pixelText, W } from '../world/pixel';
+
+// The transactions are written on an old paper scroll, unrolled between two wooden rods.
+const SC = GULLAK_LAYOUT.scroll;
+const SCROLL_END = require('../../assets/gullak/scroll-end.png');
 
 export function CategoryDetailScreen({ route, navigation }: any) {
   const { categoryId } = route.params;
@@ -150,6 +157,8 @@ export function CategoryDetailScreen({ route, navigation }: any) {
 
   return (
     <View style={styles.screen}>
+      <Image source={SCROLL_END} style={styles.rodTop} fadeDuration={0} />
+      <View style={styles.paper}>
       <SectionList
         sections={sections}
         keyExtractor={(t) => t.id}
@@ -157,7 +166,7 @@ export function CategoryDetailScreen({ route, navigation }: any) {
         contentContainerStyle={styles.content}
         ListHeaderComponent={
           <View style={styles.header}>
-            <Text style={[styles.title, { color: accent }]} numberOfLines={2}>
+            <Text style={styles.title} numberOfLines={2}>
               {categoryId === UNCATEGORIZED_ID ? 'untagged' : category?.label ?? 'transactions'}
             </Text>
             {category?.hidden && <Text style={styles.hiddenTag}>hidden</Text>}
@@ -169,7 +178,11 @@ export function CategoryDetailScreen({ route, navigation }: any) {
           </View>
         }
         renderSectionHeader={({ section }) => (
-          <Text style={[styles.monthHeading, { color: accent }]}>{section.title}</Text>
+          <View style={styles.monthRow}>
+            <View style={styles.monthRule} />
+            <Text style={styles.monthHeading}>{section.title}</Text>
+            <View style={styles.monthRule} />
+          </View>
         )}
         renderItem={({ item }) => (
           <TransactionRow
@@ -183,6 +196,8 @@ export function CategoryDetailScreen({ route, navigation }: any) {
           <Text style={styles.empty}>no transactions in {category?.label ?? 'this category'} yet.</Text>
         }
       />
+      </View>
+      <Image source={SCROLL_END} style={styles.rodBottom} fadeDuration={0} />
 
       <BottomSheet visible={noteFor !== null} onClose={() => setNoteFor(null)}>
             <Text style={styles.sheetTitle}>
@@ -245,8 +260,20 @@ export function CategoryDetailScreen({ route, navigation }: any) {
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: base.backgroundPrimary },
-  content: { paddingHorizontal: sizing.scale500, paddingBottom: sizing.scale2400 },
+  screen: { flex: 1, backgroundColor: '#EDB89C', paddingTop: 14, paddingBottom: 12, alignItems: 'center' },
+  rodTop: { width: SC.w, height: SC.h, zIndex: 2 },
+  rodBottom: { width: SC.w, height: SC.h, zIndex: 2 },
+  // the unrolled paper between the rods: aged edges darker than the middle
+  paper: {
+    flex: 1,
+    width: SC.w - 44,
+    marginVertical: -8,
+    backgroundColor: SC.paper,
+    borderLeftWidth: 4,
+    borderRightWidth: 4,
+    borderColor: SC.paperDark,
+  },
+  content: { paddingHorizontal: 14, paddingTop: 14, paddingBottom: 24 },
   // Same size as the total-spend figure on the home card.
   header: {
     flexDirection: 'row',
@@ -255,10 +282,10 @@ const styles = StyleSheet.create({
     marginTop: sizing.scale500,
     marginBottom: sizing.scale600,
   },
-  title: { ...heading.XLarge, flexShrink: 1 },
-  hiddenTag: { ...heading.XSmall, color: base.contentFaint },
+  title: { ...pixelText(9), color: SC.ink, flexShrink: 1 },
+  hiddenTag: { ...pixelText(4), color: SC.inkSoft },
   editLink: { marginLeft: 'auto' },
-  editText: { ...heading.Body, color: base.contentFaint },
+  editText: { ...pixelText(5), color: SC.inkSoft },
   editHeading: { ...heading.Small, color: base.contentFaint },
   editGap: { marginTop: sizing.scale600 },
   secondaryRow: { flexDirection: 'row', gap: sizing.scale400, marginTop: sizing.scale400 },
@@ -270,11 +297,9 @@ const styles = StyleSheet.create({
     backgroundColor: base.backgroundSecondary,
   },
   secondaryText: { ...heading.Body, color: base.contentPrimary },
-  monthHeading: {
-    ...heading.XSmall,
-    marginTop: sizing.scale800,
-    marginBottom: sizing.scale300,
-  },
+  monthRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 18, marginBottom: 4 },
+  monthRule: { flex: 1, height: 2, backgroundColor: SC.paperEdge, opacity: 0.6 },
+  monthHeading: { ...pixelText(5), color: SC.red },
   sheetTitle: { ...heading.Medium, color: base.contentPrimary },
   noteInput: {
     backgroundColor: base.backgroundSecondary,
@@ -293,8 +318,8 @@ const styles = StyleSheet.create({
   },
   okayText: { ...heading.Body, color: base.primaryB },
   empty: {
-    ...typography.ParagraphMedium,
-    color: base.contentTertiary,
+    ...pixelText(5, false),
+    color: SC.inkSoft,
     textAlign: 'center',
     marginTop: sizing.scale1200,
   },

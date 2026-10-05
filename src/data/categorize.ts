@@ -55,7 +55,14 @@ const PAYEE_RE = new RegExp(
     // 2. an explicit UPI VPA, e.g. "VPA someone@okhdfcbk"
     '|(?:\\b(?:to|from|vpa)\\s+([a-zA-Z0-9.\\-_]+@[a-zA-Z]+))' +
     // 3. card/merchant wording, e.g. "at SWIGGY on 02-08-25"
-    "|(?:\\bat\\s+([A-Za-z0-9][A-Za-z0-9 .&'\\-_]{2,30}?)\\s+on\\s+\\d)",
+    "|(?:\\bat\\s+([A-Za-z0-9][A-Za-z0-9 .&'\\-_]{2,30}?)\\s+on\\s+\\d)" +
+    // 4. PNB's wording, which none of the above fit:
+    //      "A/c X4594 debited INR 1000.00 Dt 30-09-26 to KUNJAL SINGH thru UPI:6273…"
+    //      "A/c X4594 credited for INR 1200.00 on 18-05-26 by VIKRAM SINGH thru UPI"
+    //    Without it every PNB message came out as UNKNOWN_PAYEE — all 47 in
+    //    the inbox — so a PNB→HDFC transfer to your own name was never
+    //    recognised as a savings withdrawal and was counted as spending.
+    "|(?:\\b(?:to|by)\\s+([A-Za-z][A-Za-z .&'\\-]{1,40}?)\\s+thru\\b)",
   'i'
 );
 const BANK_SENDER_RE = /^[A-Z]{2}-([A-Z]+)/; // e.g. "VM-HDFCBK" -> HDFCBK
@@ -165,7 +172,7 @@ function payeeFromDeposit(body: string): string | null {
 export function extractPayee(body: string): string {
   const m = body.match(PAYEE_RE);
   if (m) {
-    const value = m[1] ?? m[2] ?? m[3];
+    const value = m[1] ?? m[2] ?? m[3] ?? m[4];
     // Bank SMS often double-space around the name.
     if (value) return value.trim().replace(/\s+/g, ' ');
   }
